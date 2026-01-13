@@ -20,3 +20,28 @@ BEGIN
         );
     END LOOP;
 END $$;
+
+
+-- Migration for FlowExecution primary key change
+-- Run BEFORE deploying new code
+
+-- Add new columns
+ALTER TABLE flow_executions ADD COLUMN id BIGINT AUTO_INCREMENT PRIMARY KEY;
+ALTER TABLE flow_executions ADD COLUMN execution_uuid VARCHAR(36) UNIQUE;
+
+-- Populate data (preserve existing UUIDs)
+SET @row_number = 0;
+UPDATE flow_executions SET 
+    execution_uuid = id,
+    id = (@row_number:=@row_number + 1)
+ORDER BY created_at ASC;
+
+-- Rename category column
+ALTER TABLE flow_executions CHANGE COLUMN category flow_group_name VARCHAR(255);
+
+-- Update PipelineExecution foreign key
+ALTER TABLE pipeline_executions MODIFY COLUMN flow_execution_id BIGINT;
+
+-- Update constraints
+ALTER TABLE flow_executions DROP PRIMARY KEY;
+ALTER TABLE flow_executions ADD PRIMARY KEY (id);
