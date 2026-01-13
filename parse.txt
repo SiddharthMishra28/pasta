@@ -25,63 +25,116 @@ END $$;
 ---------------------------------------------------------
 
 
--- Migration for FlowExecution primary key change
--- Run BEFORE deploying new code
+-- =====================================================
+-- POSTGRESQL PRODUCTION MIGRATION: FlowExecution Primary Key Change
+-- This script removes ALL flow execution and pipeline execution data
+-- and recreates tables with BIGINT primary keys
+-- =====================================================
 
-BEGIN;
+-- IMPORTANT: BACKUP YOUR DATABASE BEFORE RUNNING THIS SCRIPT!
+-- This will PERMANENTLY DELETE all flow execution and pipeline execution data
 
--- 1. Add new columns (Postgres way)
-ALTER TABLE flow_executions
-    ADD COLUMN id BIGINT,
-    ADD COLUMN execution_uuid VARCHAR(36);
+-- Step 1: Delete all pipeline executions first (child records)
+DELETE FROM pipeline_executions;
+-- Verification: Should show 0 records
+SELECT COUNT(*) as pipeline_executions_count FROM pipeline_executions;
 
--- 2. Populate data (preserve existing UUIDs)
--- MySQL variables + ordered update → CTE + row_number()
+-- Step 2: Delete all flow executions (parent records)  
+DELETE FROM flow_executions;
+-- Verification: Should show 0 records
+SELECT COUNT(*) as flow_executions_count FROM flow_executions;
 
-WITH ordered AS (
-    SELECT
-        id AS old_id,
-        ROW_NUMBER() OVER (ORDER BY created_at ASC) AS new_id
-    FROM flow_executions
-)
-UPDATE flow_executions fe
-SET
-    execution_uuid = o.old_id,
-    id = o.new_id
-FROM ordered o
-WHERE fe.id = o.old_id;
+-- Step 3: Drop existing tables (in correct order due to foreign keys)
+DROP TABLE IF EXISTS pipeline_executions CASCADE;
+DROP TABLE IF EXISTS flow_executions CASCADE;
 
--- 3. Rename category column
-ALTER TABLE flow_executions
-    RENAME COLUMN category TO flow_group_name;
-
--- 4. Update PipelineExecution foreign key column type
-ALTER TABLE pipeline_executions
-    ALTER COLUMN flow_execution_id TYPE BIGINT
-    USING flow_execution_id::BIGINT;
-
--- 5. Drop old primary key and add new one
-ALTER TABLE flow_executions
-    DROP CONSTRAINT flow_executions_pkey;
-
-ALTER TABLE flow_executions
-    ADD CONSTRAINT flow_executions_pkey PRIMARY KEY (id);
-
--- 6. Add UNIQUE constraint (matches MySQL UNIQUE column)
-ALTER TABLE flow_executions
-    ADD CONSTRAINT flow_executions_execution_uuid_uk UNIQUE (execution_uuid);
-
--- 7. Make id auto-increment in Postgres
-CREATE SEQUENCE flow_executions_id_seq
-    OWNED BY flow_executions.id;
-
-SELECT setval(
-    'flow_executions_id_seq',
-    (SELECT MAX(id) FROM flow_executions)
+-- Step 4: Recreate flow_executions table with BIGSERIAL primary key
+CREATE TABLE flow_executions (
+    id BIGSERIAL PRIMARY KEY,
+    flow_id BIGINT NOT NULL,
+    start_time TIMESTAMP(6),
+    end_time TIMESTAMP(6),
+    runtime_variables JSONB,
+    status VARCHAR(255) CHECK (status IN ('PENDING','RUNNING','PASSED','FAILED','CANCELLED','SCHEDULED','IN_PROGRESS')),
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_replay BOOLEAN DEFAULT FALSE,
+    original_flow_execution_id BIGINT,
+    flow_group_name VARCHAR(255),
+    flow_group_id BIGINT,
+    iteration INTEGER,
+    revolutions INTEGER
 );
 
-ALTER TABLE flow_executions
-    ALTER COLUMN id SET DEFAULT nextval('flow_executions_id_seq'),
-    ALTER COLUMN id SET NOT NULL;
+-- Step 5: Recreate pipeline_executions table with BIGINT foreign key
+CREATE TABLE pipeline_executions (
+    id BIGSERIAL PRIMARY KEY,
+    flow_id BIGINT NOT NULL,
+    flow_execution_id BIGINT NOT NULL,
+    flow_step_id BIGINT NOT NULL,
+    pipeline_id BIGINT,
+    pipeline_url VARCHAR(255),
+    job_id BIGINT,
+    job_url VARCHAR(255),
+    start_time TIMESTAMP(6),
+    end_time TIMESTAMP(6),
+    configured_test_data JSONB,
+    runtime_test_data JSONB,
+    status VARCHAR(255) CHECK (status IN ('PENDING','RUNNING','PASSED','FAILED','CANCELLED','SCHEDULED','IN_PROGRESS')),
+    created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_replay BOOLEAN NOT NULL DEFAULT FALSE,
+    resume_time TIMESTAMP(6),
+    
+    -- Foreign key constraint
+    CONSTRAINT fk_pipeline_flow_execution 
+    FOREIGN KEY (flow_execution_id) REFERENCES flow_executions(id) ON DELETE CASCADE
+);
+
+-- Step 6: Reset sequences to start from 1
+-- PostgreSQL automatically creates sequences for BIGSERIAL columns
+ALTER SEQUENCE flow_executions_id_seq RESTART WITH 1;
+ALTER SEQUENCE pipeline_executions_id_seq RESTART WITH 1;
+
+-- Step 7: Create indexes for performance (recommended for PostgreSQL)
+CREATE INDEX idx_flow_executions_flow_id ON flow_executions(flow_id);
+CREATE INDEX idx_flow_executions_status ON flow_executions(status);
+CREATE INDEX idx_flow_executions_created_at ON flow_executions(created_at);
+CREATE INDEX idx_pipeline_executions_flow_execution_id ON pipeline_executions(flow_execution_id);
+CREATE INDEX idx_pipeline_executions_flow_step_id ON pipeline_executions(flow_step_id);
+CREATE INDEX idx_pipeline_executions_status ON pipeline_executions(status);
+
+-- =====================================================
+-- VERIFICATION QUERIES
+-- Run these after migration to confirm success
+-- =====================================================
+
+-- Check table structures
+\d flow_executions;
+\d pipeline_executions;
+
+-- Verify record counts (should be 0)
+SELECT COUNT(*) as flow_executions_count FROM flow_executions;
+SELECT COUNT(*) as pipeline_executions_count FROM pipeline_executions;
+
+-- Verify primary keys are BIGSERIAL (BIGINT with auto-increment)
+SELECT 
+    schemaname, 
+    tablename, 
+    column_name, 
+    data_type, 
+    is_nullable, 
+    column_default 
+FROM information_schema.columns 
+WHERE table_name IN ('flow_executions', 'pipeline_executions') 
+AND column_name = 'id'
+ORDER BY table_name;
+
+-- Verify sequences
+SELECT sequence_name, start_value, increment_by FROM information_schema.sequences 
+WHERE sequence_name IN ('flow_executions_id_seq', 'pipeline_executions_id_seq');
+
+-- Test auto-increment (optional - insert test record and verify)
+-- INSERT INTO flow_executions (flow_id, status) VALUES (1, 'RUNNING');
+-- SELECT * FROM flow_executions;
+-- DELETE FROM flow_executions WHERE id = 1; -- Clean up test record
 
 COMMIT;
