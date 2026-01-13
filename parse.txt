@@ -1,32 +1,22 @@
-Rule_ID,Field_Target,Rule_Category,Validation_Type,Operator,Expected_Value,Pre_Condition,Severity
-Check_08,CURRENCY_CODE,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_09,ACCOUNT_TRANSACTION_AMOUNT,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_10,ORIGINAL_CURRENCY_CODE,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_11,ORIGINAL_ACCOUNT_TRAN_AMT,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_12,CHANNEL,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_13,EXEC_GPN,CONDITIONAL_REQ,PRESENCE,NOT_NULL,TRUE,CHANNEL == 'BANKERDESKTOP',CRITICAL
-Check_14,TRANSACTION_TYPE_CODE,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_15,CP_FIN_INST_DOM_CTRY_CD,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_16,CP_CTRY_CD,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_17,INSTR_QTY,MANDATORY_FIELD,PRESENCE,NOT_NULL,TRUE,NONE,CRITICAL
-Check_18,ACC_TRAN_VALUE_DATE,DATA_FORMAT,REGEX,MATCHES,^\d{4}-\d{2}-\d{2}$,NONE,ERROR
-Check_19,CREDIT,ALLOWED_VALUES,SET_CHECK,IN_LIST,"['C', 'D']",NONE,ERROR
-Check_20,"CLIENT_TRAN_ID, BATCH_ID",DATA_INTEGRITY,UNIQUENESS,NO_DUPLICATES,TRUE,NONE,CRITICAL
-Check_21,RecordCount,BATCH_INTEGRITY,METADATA,EXISTS,TRUE,NONE,WARNING
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    FOR r IN
+        SELECT tablename
+        FROM pg_tables
+        WHERE schemaname = 'source_schema'
+    LOOP
+        EXECUTE format(
+            'CREATE TABLE target_schema.%I (LIKE source_schema.%I INCLUDING ALL);',
+            r.tablename,
+            r.tablename
+        );
 
-
-1. Rule_Category (The "Why")
-MANDATORY_FIELD: Core fields that must always be populated.
-CONDITIONAL_REQ: Fields that are mandatory only under specific business scenarios.
-DATA_FORMAT: Ensures the string structure (Dates, IDs) matches downstream system requirements.
-ALLOWED_VALUES: Validates data against a specific business domain or list.
-DATA_INTEGRITY: Validates relationships between records (e.g., duplicates).
-BATCH_INTEGRITY: Validates the overall payload rather than individual rows.
-
-2. Validation_Type & Operator
-Enum Name,Description,Logic Logic
-NOT_NULL,Presence check,"Fails if the value is Empty, Null, or Whitespace."
-MATCHES,Pattern check,Uses Regular Expressions (Regex) to validate string structure.
-IN_LIST,Domain check,Compares value against a comma-separated list or JSON array.
-NO_DUPLICATES,Uniqueness check,Scans the resultset for identical combinations of the target fields.
-EXISTS,Metadata check,Ensures the field header/key exists in the message payload.
+        EXECUTE format(
+            'INSERT INTO target_schema.%I SELECT * FROM source_schema.%I;',
+            r.tablename,
+            r.tablename
+        );
+    END LOOP;
+END $$;
