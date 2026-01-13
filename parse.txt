@@ -22,26 +22,77 @@ BEGIN
 END $$;
 
 
--- Migration for FlowExecution primary key change
--- Run BEFORE deploying new code
+---------------------------------------------------------
 
--- Add new columns
-ALTER TABLE flow_executions ADD COLUMN id BIGINT AUTO_INCREMENT PRIMARY KEY;
-ALTER TABLE flow_executions ADD COLUMN execution_uuid VARCHAR(36) UNIQUE;
 
--- Populate data (preserve existing UUIDs)
-SET @row_number = 0;
-UPDATE flow_executions SET 
-    execution_uuid = id,
-    id = (@row_number:=@row_number + 1)
-ORDER BY created_at ASC;
+BEGIN;
 
--- Rename category column
-ALTER TABLE flow_executions CHANGE COLUMN category flow_group_name VARCHAR(255);
+-- 1. Add new columns (nullable initially)
+ALTER TABLE flow_executions
+    ADD COLUMN id BIGINT,
+    ADD COLUMN execution_uuid UUID;
 
--- Update PipelineExecution foreign key
-ALTER TABLE pipeline_executions MODIFY COLUMN flow_execution_id BIGINT;
+-- 2. Populate new columns deterministically
+WITH ordered AS (
+    SELECT
+        old_id,
+        ROW_NUMBER() OVER (ORDER BY created_at ASC) AS new_id
+    FROM (
+        SELECT id AS old_id, created_at
+        FROM flow_executions
+    ) t
+)
+UPDATE flow_executions fe
+SET
+    id = o.new_id,
+    execution_uuid = o.old_id
+FROM ordered o
+WHERE fe.id = o.old_id;
 
--- Update constraints
-ALTER TABLE flow_executions DROP PRIMARY KEY;
-ALTER TABLE flow_executions ADD PRIMARY KEY (id);
+-- 3. Create and attach sequence
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_class WHERE relname = 'flow_executions_id_seq'
+    ) THEN
+        CREATE SEQUENCE flow_executions_id_seq
+            OWNED BY flow_executions.id;
+    END IF;
+END $$;
+
+SELECT setval(
+    'flow_executions_id_seq',
+    (SELECT MAX(id) FROM flow_executions)
+);
+
+ALTER TABLE flow_executions
+    ALTER COLUMN id SET DEFAULT nextval('flow_executions_id_seq'),
+    ALTER COLUMN id SET NOT NULL;
+
+-- 4. Rename category column
+ALTER TABLE flow_executions
+    RENAME COLUMN category TO flow_group_name;
+
+-- 5. Update foreign key column type
+ALTER TABLE pipeline_executions
+    ALTER COLUMN flow_execution_id TYPE BIGINT
+    USING flow_execution_id::BIGINT;
+
+-- 6. Drop old primary key and add new one
+ALTER TABLE flow_executions
+    DROP CONSTRAINT flow_executions_pkey;
+
+ALTER TABLE flow_executions
+    ADD CONSTRAINT flow_executions_pkey PRIMARY KEY (id);
+
+-- 7. Add uniqueness constraint for preserved UUID
+ALTER TABLE flow_executions
+    ADD CONSTRAINT flow_executions_execution_uuid_uk UNIQUE (execution_uuid);
+
+-- 8. Recreate foreign key constraint
+ALTER TABLE pipeline_executions
+    ADD CONSTRAINT pipeline_executions_flow_execution_fk
+    FOREIGN KEY (flow_execution_id)
+    REFERENCES flow_executions(id);
+
+COMMIT;
